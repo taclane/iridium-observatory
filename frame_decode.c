@@ -576,7 +576,9 @@ static int parse_msg(const uint8_t *data, int data_len, msg_data_t *msg)
     msg->seq = seq;
     msg->block = block_no;
     msg->frame = frame_no;
-    msg->csum_ok = msg_checksum_ok(mblk, n_msg);
+    /* bitsparser runs msg_checksum over blocks[1:]: the first message block
+     * (RIC start) is outside the checksum. */
+    msg->csum_ok = msg_checksum_ok(mblk + 1, n_msg - 1);
 
     if (format == 5) {
         /* ASCII: pkt_cs2[0:4], len_bit[4], then optional counter fields. */

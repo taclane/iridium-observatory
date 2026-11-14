@@ -55,6 +55,7 @@ while IFS='|' read -r ric txt; do
     got="$(decode_txt "$bitstr")"
     want="$(printf '%s' "$txt" | sed 's/ *$//')"
     if [ "$got" = "$want" ]; then ok "ric=$ric [$txt]"; else bad "ric=$ric exp=[$want] got=[$got]"; fi
+    if "$BUILD/test_msg" "$bitstr" | grep -q ' ok=1 '; then ok "ric=$ric packet checksum"; else bad "ric=$ric packet checksum not ok"; fi
 done <<'CASES'
 42|Hi
 100|ABC, def! @#$%

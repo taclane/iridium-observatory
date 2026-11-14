@@ -75,6 +75,21 @@ def encode(ric, text, seq=10, block=3, frame=5):
     nbody = T // 20
     body_blocks = ['0' + rest[i * 20:(i + 1) * 20] for i in range(nbody)]
 
+    # Packet checksum (bitsparser msg_checksum over body_blocks[1:]): the
+    # 10-bit value sits reversed in rest[37:47] (pkt_cs1 + pkt_cs2) and must
+    # bring the 8/8/5-bit block sums to 1023 mod 1024.
+    cb = body_blocks[1:]
+    csum = 0
+    for idx, c in enumerate(cb):
+        if idx != 1:
+            csum += int(c[:8], 2)
+        csum += int(c[8:16], 2)
+        if idx != 0:
+            csum += int(c[16:], 2)
+    cv = bits((1023 - csum) % 1024, 10)[::-1]
+    rest = rest[:37] + cv + rest[47:]
+    body_blocks = ['0' + rest[i * 20:(i + 1) * 20] for i in range(nbody)]
+
     bch_blocks = (1 + nbody) // 2
     hdr = "0" + "0000" + bits(block, 4) + bits(frame, 6) + bits(bch_blocks, 4) + "00"
     assert len(hdr) == 21
