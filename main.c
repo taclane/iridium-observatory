@@ -181,6 +181,7 @@ int gsmtap_port = GSMTAP_DEFAULT_PORT;
 int use_gpu = 1;
 int full_burst_window = 0;  /* --full-burst-window */
 int legacy_frontend = 0;    /* --legacy-frontend */
+int no_block_thread = 0;    /* --no-block-thread */
 
 int simd_mode = 0;  /* SIMD_AUTO */
 char *save_bursts_dir = NULL;
@@ -1563,6 +1564,7 @@ int main(int argc, char **argv) {
          * default); the downmix drops bursts decimated to another rate. */
         .output_rate = legacy_frontend ? 0
                        : IR_DEFAULT_SPS * IR_SYMBOLS_PER_SECOND,
+        .block_thread = !no_block_thread,
     };
     burst_detector_t *det = burst_detector_create(&det_config);
     global_detector = det;

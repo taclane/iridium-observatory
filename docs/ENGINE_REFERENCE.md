@@ -906,6 +906,8 @@ Detection options:
                              as gr-iridium does (default: cut it to the frame)
     --legacy-frontend       shift and decimate each burst on its own in the
                              downmix (default: one shared overlap-save FFT)
+    --no-block-thread       run the overlap-save block FFTs on the detector's
+                             thread (default: their own, with 2+ CPUs)
     --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar
     --no-simd               alias for --simd=scalar
     --workers=N             downmix worker threads (1-32, default: auto from CPU cores)
