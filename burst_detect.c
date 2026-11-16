@@ -476,6 +476,14 @@ burst_detector_t *burst_detector_create(burst_config_t *config) {
         d->osc = os_chan_create(d->sample_rate, config->output_rate,
                                 ringbuf_read_cb, d);
         d->osc_bins_per = d->osc ? os_chan_bins_per(d->osc, d->fft_size) : 0;
+        /* Block FFTs were most of this thread's work; a thread of their own
+         * leaves it detection, which can't be split. Not with an FFT plugin:
+         * its state machine runs a whole batch (~110 blocks) behind the
+         * newest input, further than the block cache reaches, and the
+         * plugin has taken this thread's own FFTs already. */
+        if (d->osc && !d->gpu && config->block_thread && sysconf(_SC_NPROCESSORS_ONLN) >= 2 &&
+            os_chan_start_thread(d->osc) == 0)
+            fprintf(stderr, "burst_detect: overlap-save block FFTs on their own thread\n");
         if (d->osc && d->osc_bins_per == 0) {
             os_chan_destroy(d->osc);
             d->osc = NULL;
@@ -614,6 +622,22 @@ static float complex *ringbuf_extract(burst_detector_t *d, uint64_t start,
     return buf;
 }
 
+/* Write n samples to the ring and publish them. The block thread reads the
+ * ring too: os_chan_overwrite first waits until it isn't reading anything
+ * about to be overwritten. */
+static void ring_append(burst_detector_t *d, const float complex *samples, size_t n) {
+    if (d->osc)
+        os_chan_overwrite(d->osc, d->sample_count + n > d->ringbuf_size
+                                  ? d->sample_count + n - d->ringbuf_size : 0);
+    ringbuf_write(d, samples, n);
+    __atomic_store_n(&d->sample_count, d->sample_count + n, __ATOMIC_RELEASE);
+    /* Straight away, so the thread transforms the blocks these samples
+     * complete while this thread runs detection over them: the last block
+     * of each burst to be emitted is one of them. */
+    if (d->osc)
+        os_chan_advance(d->osc, d->index, d->sample_count);
+}
+
 /* os_chan's read callback: copy [start, start + n), zero-filling what the
  * ring doesn't hold (aged out, or not received yet). The oldest sample held
  * is worked out from sample_count here rather than taken from ringbuf_start,
@@ -621,9 +645,12 @@ static float complex *ringbuf_extract(burst_detector_t *d, uint64_t start,
 static int ringbuf_read_cb(void *ctx, uint64_t start, size_t n,
                            float complex *dst) {
     burst_detector_t *d = ctx;
-    uint64_t have_lo = d->sample_count > d->ringbuf_size
-                       ? d->sample_count - d->ringbuf_size : 0;
-    uint64_t have_hi = d->sample_count;
+    /* Called from the block thread too: sample_count is published with
+     * release (ring_append), and os_chan keeps the thread off any part of
+     * the ring being written. */
+    uint64_t count = __atomic_load_n(&d->sample_count, __ATOMIC_ACQUIRE);
+    uint64_t have_lo = count > d->ringbuf_size ? count - d->ringbuf_size : 0;
+    uint64_t have_hi = count;
     uint64_t lo = start > have_lo ? start : have_lo;
     uint64_t hi = start + n < have_hi ? start + n : have_hi;
     int complete = lo == start && hi == start + n;
@@ -1068,8 +1095,7 @@ void burst_detector_feed(burst_detector_t *d, const int8_t *iq,
     simd_convert_i8_cf(iq, d->convert_buf, num_samples);
 
     /* Write to ringbuffer */
-    ringbuf_write(d, d->convert_buf, num_samples);
-    d->sample_count += num_samples;
+    ring_append(d, d->convert_buf, num_samples);
 
     /* Process complete FFT frames */
     if (d->gpu) {
@@ -1165,8 +1191,7 @@ void burst_detector_feed_cf32(burst_detector_t *d, const float *iq,
         d->convert_buf[i] = iq[2 * i] + iq[2 * i + 1] * I;
 
     /* Write to ringbuffer */
-    ringbuf_write(d, d->convert_buf, num_samples);
-    d->sample_count += num_samples;
+    ring_append(d, d->convert_buf, num_samples);
 
     /* Process complete FFT frames (identical to int8 path) */
     if (d->gpu) {
