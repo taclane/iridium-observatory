@@ -76,7 +76,36 @@ pthread_mutex_t fftw_planner_mutex;
 /* FFTW wisdom file path */
 #define FFTW_WISDOM_FILE ".iridium-sniffer-fftw-wisdom"
 
+/* Shipped wisdom for CPUs where planning is slow. Without any, FFTW_MEASURE
+ * planning on a Raspberry Pi 4 takes over two minutes at 10 MS/s, before
+ * the radio starts. Made on a Pi 4 (Cortex-A72) with Debian's FFTW 3.3.10;
+ * FFTW checks its own build signature on import and ignores wisdom from any
+ * other build, which then plans as before. Wisdom only picks among
+ * algorithms that all give the same transform, so it can only cost speed. */
+#if defined(__aarch64__)
+#define FFTW_SEED_FILE "fftw-wisdom-aarch64"
+#endif
+
 static void fftw_load_wisdom(void) {
+#ifdef FFTW_SEED_FILE
+    /* <exe>/../data (installed, or run from a build dir), else <exe>/data */
+    char seed[512];
+    ssize_t n = readlink("/proc/self/exe", seed, sizeof(seed) - 1);
+    char *slash = n > 0 ? (seed[n] = '\0', strrchr(seed, '/')) : NULL;
+    if (slash) {
+        static const char *dirs[] = { "../data/", "data/" };
+        for (int i = 0; i < 2; i++) {
+            snprintf(slash + 1, sizeof(seed) - (size_t)(slash + 1 - seed), "%s%s",
+                     dirs[i], FFTW_SEED_FILE);
+            if (access(seed, R_OK) != 0)
+                continue;
+            if (fftwf_import_wisdom_from_filename(seed))
+                fprintf(stderr, "FFTW: loaded shipped wisdom from %s\n", seed);
+            break;
+        }
+    }
+#endif
+    /* this machine's own, on top: where both have a plan, it wins */
     const char *home = getenv("HOME");
     if (!home) return;
     char path[512];
@@ -1593,6 +1622,10 @@ int main(int argc, char **argv) {
         downmix_config_t dm_config = { 0 };
         dm[i] = burst_downmix_create(&dm_config);
     }
+    /* Every plan is made by now. Save the wisdom straight away, not only at
+     * a clean shutdown: a receiver that loses power or crashes would
+     * otherwise plan from scratch again at every start (minutes on a Pi). */
+    fftw_save_wisdom();
 
     /* Launch burst detector thread */
     pthread_create(&detector, NULL, burst_detector_thread, det);
