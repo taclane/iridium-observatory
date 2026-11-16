@@ -58,6 +58,17 @@ int os_chan_extract(os_chan_t *c, uint64_t start, uint64_t stop,
                     int bin_shift, float complex *out, int max_out,
                     uint64_t *delay_ns);
 
+/* Transform blocks on a thread of their own as their input arrives, so
+ * os_chan_extract mostly finds them cached; 0 on success. The caller
+ * then has to keep the thread informed: */
+int os_chan_start_thread(os_chan_t *c);
+/* After each feed: the detector's state machine is at input index pos, and
+ * input [0, have_hi) has been received. */
+void os_chan_advance(os_chan_t *c, uint64_t pos, uint64_t have_hi);
+/* Before writing to the ring: input below lo is about to be overwritten.
+ * Returns once the thread isn't reading any of it. */
+void os_chan_overwrite(os_chan_t *c, uint64_t lo);
+
 /* Counters for diagnostics: blocks transformed, blocks served from cache. */
 void os_chan_stats(const os_chan_t *c, uint64_t *ffts, uint64_t *hits);
 

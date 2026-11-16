@@ -908,6 +908,11 @@ Detection options:
                              as gr-iridium does (default: cut it to the frame)
     --legacy-frontend       shift and decimate each burst on its own in the
                              downmix (default: one shared overlap-save FFT)
+    --low-power             for a slow CPU: the overlap-save block FFTs on a thread
+                             of their own, off the detector thread (always on on
+                             a Raspberry Pi; costs CPU in all on a fast machine)
+    --no-block-thread       keep the block FFTs on the detector thread, even on
+                             a Raspberry Pi or with --low-power
     --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar
     --no-simd               alias for --simd=scalar
     --workers=N             downmix worker threads (1-32, default: auto from CPU cores)
