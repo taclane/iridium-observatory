@@ -32,9 +32,9 @@ the receiver does.
 ## What you need
 
 - **A computer** running Ubuntu, Debian, Raspberry Pi OS or DragonOS. An Intel N100 or a
-  Raspberry Pi 5 is enough; see the [engine reference](docs/ENGINE_REFERENCE.md#low-power-hardware-n100-pi-5-arm).
-  A **Raspberry Pi 4 is not supported**: it can't decode a full-band SDR in real time,
-  falls hours behind and fills its memory.
+  Raspberry Pi 5 is comfortable. A **Raspberry Pi 4** keeps up with a full-band SDR on a
+  **64-bit** OS and a power supply that holds up, with less headroom; a 32-bit OS, or a
+  Pi 3 or older, is too slow. See the [engine reference](docs/ENGINE_REFERENCE.md#low-power-hardware-n100-pi-5-arm).
 - **An SDR that tunes to 1.6 GHz.** An Airspy R2 covers the whole Iridium band with
   its native driver; a HackRF One, USRP, BladeRF or SDRplay also works well, and an
   RTL-SDR covers only a narrow slice of the band (the ring-alert and pager channels). See [SDR hardware](docs/ENGINE_REFERENCE.md#sdr-hardware).

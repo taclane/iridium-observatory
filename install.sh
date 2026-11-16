@@ -111,18 +111,34 @@ fi
 RUN_USER="$(id -un)"
 ok "user: $RUN_USER   arch: $(uname -m)   $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown OS}")"
 
-# A Raspberry Pi 4 (or 400, 3, Zero, CM4) can't keep up with a full-band SDR:
-# on a Pi 4 with an Airspy R2 the receiver used every core, fell hours behind
-# and filled memory, and the message tabs stayed nearly empty. A Pi 5 or an
-# Intel N100-class mini PC is the minimum.
+# Too slow for a full-band SDR: a Raspberry Pi 3, Zero or older, and any ARM
+# board on a 32-bit OS (the NEON kernels are AArch64 code, so a 32-bit build
+# is plain C, even on a 64-bit kernel). A Pi 4, 400 or CM4 on a 64-bit OS
+# keeps up at 10 MS/s if its power supply holds up (engine reference).
 PI_MODEL="$( { tr -d '\0' < /proc/device-tree/model; } 2>/dev/null || true)"
-if [ "$MODE" != uninstall ] && printf '%s' "$PI_MODEL" | grep -qE '^Raspberry Pi ([1-4]|Zero|Model|Compute Module [1-4])'; then
-  warn "$PI_MODEL is not supported: it is too slow to decode Iridium in real time."
-  warn "Use a Raspberry Pi 5 or an Intel N100-class mini PC instead."
-  if [ "$ASSUME_YES" -eq 1 ] || [ ! -r /dev/tty ]; then
-    warn "continuing anyway (--yes)"
-  else
-    yes_no "Continue anyway?" n || die "stopped: unsupported hardware"
+if [ "$MODE" != uninstall ]; then
+  SLOW=""
+  if printf '%s' "$PI_MODEL" | grep -qE '^Raspberry Pi ([1-3]( |$)|Zero|Model|Compute Module [1-3])'; then
+    SLOW="$PI_MODEL is too slow to decode Iridium in real time. A Raspberry Pi 4 or 5 on a 64-bit OS, or an Intel N100-class mini PC, keeps up."
+  elif case "$(uname -m)" in arm*|aarch64) [ "$(getconf LONG_BIT 2>/dev/null)" = 32 ];; *) false;; esac; then
+    SLOW="this is a 32-bit OS: the receiver builds without its NEON (ARM SIMD) code and is too slow for a full-band SDR. Install the 64-bit OS."
+  fi
+  if [ -n "$SLOW" ]; then
+    warn "$SLOW"
+    if [ "$ASSUME_YES" -eq 1 ] || [ ! -r /dev/tty ]; then
+      warn "continuing anyway (--yes)"
+    else
+      yes_no "Continue anyway?" n || die "stopped: hardware too slow"
+    fi
+  elif printf '%s' "$PI_MODEL" | grep -qE '^Raspberry Pi (4|400)|^Raspberry Pi Compute Module 4'; then
+    ok "$PI_MODEL on a 64-bit OS: keeps up at 10 MS/s with a power supply that holds up"
+    # 0x1 / 0x4: under-voltage / throttled now; 0x10000 / 0x40000: since boot
+    T="$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)"
+    if [ -n "$T" ] && [ $(( T & 0x50005 )) -ne 0 ]; then
+      warn "this Pi has run short of power since boot (vcgencmd get_throttled = $T). That throttles"
+      warn "the CPU and starves the SDR: use a 3 A supply, a powered USB hub for the SDR, or turn off a"
+      warn "touchscreen's backlight (echo 1 | sudo tee /sys/class/backlight/*/bl_power)"
+    fi
   fi
 fi
 
