@@ -7,9 +7,10 @@ worked out from the satellites alone, typically to within a few km. It keeps a d
 long-run dashboards, and it can feed aircraft messages and positions to aggregators
 such as airframes.io.
 
-> **Latest release: [v1.1](https://github.com/mebrown47/iridium-observatory/releases/tag/v1.1)** (13 November 2026).
-> Already installed? Run `./install.sh --update`: installs from before v1.1 decode far
-> fewer uplink (aircraft and handset to satellite) messages.
+> **Latest release: [v1.2](https://github.com/mebrown47/iridium-observatory/releases/tag/v1.2)** (15 November 2026).
+> Already installed? Run `./install.sh --update`: v1.2 does the same decoding for about a
+> quarter of the CPU, and installs from before v1.1 decode far fewer uplink (aircraft and
+> handset to satellite) messages.
 
 It is a fork of [iridium-sniffer](https://github.com/alphafox02/iridium-sniffer) and keeps
 that project's receiver engine at its core. [How it differs](#how-it-differs-from-iridium-sniffer)
@@ -22,7 +23,7 @@ Two services that start at boot, each with a web page:
 | Port | Service | What it shows |
 |---|---|---|
 | 8888 | **Receiver** (`iridium-sniffer`) | Live map of satellite beams, paging and aircraft, with ACARS, Pager and AT1 tabs (AT1 carries ADS-C position reports and CPDLC clearances) and a live count of every frame type heard |
-| 8890 | **Observatory** | **Trends**: the traffic mix over hours and days. **Aviation**: per-aircraft history, CPDLC log and ADS-C contracts. **Doppler**: each satellite pass drawn as a frequency curve, the satellites overhead and their upcoming passes, and your receiver's estimated location. **Coverage**: a sky plot of where the station decodes well, and its effective horizon. **Graph**: which air traffic authorities hand aircraft to which, from CPDLC, and one aircraft's history |
+| 8890 | **Observatory** | **Trends**: the traffic mix over hours and days. **Aviation**: per-aircraft history, CPDLC log and ADS-C contracts. **Doppler**: each satellite pass drawn as a frequency curve, the satellites overhead and their upcoming passes, and your receiver's estimated location. **Coverage**: a sky plot of where the station decodes well, and its effective horizon. **Graph**: which air traffic authorities hand aircraft to which, from CPDLC, and one aircraft's history. **Search**: every stored ACARS message, filtered by aircraft, text, label, direction and date, with a CSV download |
 
 The Observatory only reads the receiver's archive and live feed; it never changes what
 the receiver does.
@@ -193,8 +194,8 @@ and port status, the live pages' state, and recent logs, into one file. The repo
 includes your settings and estimated location, so check it before posting it publicly.
 
 **Which version am I running?** It's at the foot of every page, and
-`iridium-sniffer --version` prints it. A release shows as `v1.1`; a build from later
-commits on main shows as, for example, `v1.1-3-g4f31b44` (3 commits after v1.1).
+`iridium-sniffer --version` prints it. A release shows as `v1.2`; a build from later
+commits on main shows as, for example, `v1.2-3-g1a2b3c4` (3 commits after v1.2).
 
 **No satellites on the Doppler page: "TLE download failed".** The Observatory needs orbit
 data (TLEs) from CelesTrak about once a day. It asks at most once every 2 hours, and after
