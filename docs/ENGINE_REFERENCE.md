@@ -90,20 +90,18 @@ cmake .. -DUSE_OPENCL=OFF
 make -j$(nproc)
 ```
 
-**FFTW wisdom (important for ARM):** FFTW uses `FFTW_MEASURE` to benchmark FFT algorithms at plan creation time. On x86 this is fast and unnoticeable. On ARM it can block for 30-60+ seconds per plan, causing `q_max` to climb during live capture as samples queue up while plans are being built.
+**FFTW wisdom (important for ARM):** Before the radio starts, FFTW (`FFTW_MEASURE`) times candidate algorithms for every FFT size the receiver uses. On most PCs that takes well under a second. On a Raspberry Pi 4 the set for 10 MS/s takes about 2¼ minutes, and the receiver isn't listening until it's done.
 
-Pre-generate a wisdom file to avoid this. iridium-sniffer automatically loads wisdom from `~/.iridium-sniffer-fftw-wisdom` at startup and saves updated wisdom on shutdown. After the first successful run (or the command below), subsequent starts are immediate.
+What it learns is kept in `~/.iridium-sniffer-fftw-wisdom`. It's loaded at startup, saved as soon as planning is done and again at shutdown, so a machine that loses power without a clean shutdown keeps it too. `install.sh` does the planning once for the sample rate in your settings, before it starts the service, so a new station starts listening straight away. When the file already covers that rate, the step takes a few seconds.
 
-The required wisdom entries depend on sample rate. The burst detection FFT size varies, while the downmix FFTs are always the same (cof4096 for CFO estimation, cof2048/cob2048 for correlation):
+To plan another sample rate ahead of time, run the receiver once on any input at that rate; it saves what it planned:
 
-| Sample Rate | Burst FFT | Wisdom Command |
-|-------------|-----------|----------------|
-| 2-2.4 MHz (RTL-SDR) | 2048 | `fftwf-wisdom -v -o ~/.iridium-sniffer-fftw-wisdom cof2048 cof4096 cob2048` |
-| 6 MHz (Airspy Mini) | 8192 | `fftwf-wisdom -v -o ~/.iridium-sniffer-fftw-wisdom cof8192 cof4096 cof2048 cob2048` |
-| 10 MHz (default) | 8192 | `fftwf-wisdom -v -o ~/.iridium-sniffer-fftw-wisdom cof8192 cof4096 cof2048 cob2048` |
-| 12 MHz (extended) | 16384 | `fftwf-wisdom -v -o ~/.iridium-sniffer-fftw-wisdom cof16384 cof4096 cof2048 cob2048` |
+```bash
+head -c 400000 /dev/zero > /tmp/silence.ci8
+iridium-sniffer -f /tmp/silence.ci8 --format=ci8 -r 6000000 -c 1622000000 > /dev/null
+```
 
-The naming convention: `cof` = complex forward, `cob` = complex backward, followed by the FFT size. If running multiple sample rates on the same system, include all burst FFT sizes in one command (e.g., `cof2048 cof8192 cof4096 cob2048`). The "system-wisdom import failed" warning from `fftwf-wisdom` is normal on a fresh system and can be ignored.
+Running the receiver is the reliable way to get every size: since v1.2 the overlap-save front end adds sizes of its own (at 10 MS/s a 40,960-point forward and a 1,024-point inverse FFT), which a hand-written `fftwf-wisdom` list easily misses. Wisdom only chooses among algorithms that compute the same transform, so it affects speed, never output, and FFTW ignores wisdom from a different FFTW build.
 
 GNU Radio manages FFTW wisdom automatically (in `~/.gr_fftw_wisdom`), which is why gr-iridium users never encounter this issue. Since iridium-sniffer replaces the GNU Radio dependency, it handles wisdom directly.
 

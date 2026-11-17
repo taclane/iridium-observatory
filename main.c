@@ -1567,6 +1567,10 @@ int main(int argc, char **argv) {
         downmix_config_t dm_config = { 0 };
         dm[i] = burst_downmix_create(&dm_config);
     }
+    /* Every plan is made by now. Save the wisdom straight away, not only at
+     * a clean shutdown: a receiver that loses power or crashes would
+     * otherwise plan from scratch again at every start (minutes on a Pi). */
+    fftw_save_wisdom();
 
     /* Launch burst detector thread */
     pthread_create(&detector, NULL, burst_detector_thread, det);
