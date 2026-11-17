@@ -387,7 +387,7 @@ else
         SDR+=" --airspy-sensitivity=$g"
       fi
     fi
-    SNIFFER_ARGS="$SDR --acars"
+    SNIFFER_ARGS="$SDR --acars --stats-interval=60"
     yes_no "Power an LNA through the SDR's bias tee" n && SNIFFER_ARGS+=" -B"
     yes_no "Estimate this receiver's position from Doppler" y && SNIFFER_ARGS+=" --position"
     nfeed=0
@@ -411,7 +411,6 @@ else
     if yes_no "Feed aircraft positions (SBS/BaseStation) to an aggregator" n; then
       bs="$(ask "Aggregator HOST:PORT" "thebaldgeek.net:2226")"
       SNIFFER_ARGS+=" --basestation=$bs"
-      yes_no "Include beam-estimated positions in that feed" y && SNIFFER_ARGS+=" --basestation-beam"
     fi
   fi
   SNIFFER_ARGS="$(echo "$SNIFFER_ARGS" | sed 's/^ *//; s/  */ /g')"

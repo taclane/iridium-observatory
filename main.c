@@ -267,7 +267,6 @@ char *vita49_endpoint = NULL;
 
 /* BaseStation (SBS) output */
 int basestation_enabled = 0;
-int basestation_beam = 0;
 char *basestation_endpoint = NULL;
 char *aircraft_db_path = NULL;
 
@@ -281,46 +280,6 @@ pthread_mutex_t vita49_ctx_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t vita49_ctx_cond = PTHREAD_COND_INITIALIZER;
 int vita49_ctx_ready = 0;
 
-/* ---- Beam cache for ACARS aircraft position correlation ---- */
-/* Stores recent IRA ground beam positions (alt < 100) so the ACARS
- * callback can correlate a received message with the beam it arrived on. */
-
-#define BEAM_CACHE_SIZE 64
-
-typedef struct {
-    double lat, lon;
-    int sat_id, beam_id;
-    uint64_t timestamp_ns;  /* 0 = empty slot */
-} beam_cache_t;
-
-static beam_cache_t beam_cache[BEAM_CACHE_SIZE];
-static int beam_cache_head = 0;
-static pthread_mutex_t beam_cache_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/* Look up the most recent ground beam position within 10 s before ts_ns.
- * Returns 1 and fills out-params on success, 0 if no match found. */
-int beam_cache_lookup(uint64_t ts_ns, double *lat, double *lon,
-                      int *sat_id, int *beam_id)
-{
-    int found = 0;
-    pthread_mutex_lock(&beam_cache_lock);
-    for (int i = 0; i < BEAM_CACHE_SIZE; i++) {
-        int idx = (beam_cache_head - 1 - i + BEAM_CACHE_SIZE) % BEAM_CACHE_SIZE;
-        beam_cache_t *e = &beam_cache[idx];
-        if (e->timestamp_ns == 0) break;           /* empty -- stop */
-        if (e->timestamp_ns > ts_ns) continue;    /* future entry */
-        if (ts_ns - e->timestamp_ns > 10000000000ULL) break; /* > 10 s */
-        *lat    = e->lat;
-        *lon    = e->lon;
-        *sat_id = e->sat_id;
-        *beam_id = e->beam_id;
-        found = 1;
-        break;
-    }
-    pthread_mutex_unlock(&beam_cache_lock);
-    return found;
-}
-
 /* Clock/time source (CLOCK_SRC_INTERNAL/EXTERNAL/GPSDO from sdr.h) */
 int clock_source = CLOCK_SRC_INTERNAL;
 int time_source = CLOCK_SRC_INTERNAL;
@@ -332,6 +291,11 @@ volatile sig_atomic_t running = 1;
  * and stayed silent for 30 hours with the process alive and no error. Exit
  * non-zero so systemd's restart reopens the radio. 0 disables. */
 int stall_exit_s = 300;
+/* --stats-interval: seconds between status lines (and at most this often a
+ * POSITION line); 0 prints none. Only the printing: the watchdog above and
+ * Doppler positioning still run every second. A service logging a line a
+ * second wears an SD card for nothing (#11). */
+int stats_interval = 1;
 static volatile sig_atomic_t stalled = 0;
 pid_t self_pid;
 
@@ -993,19 +957,6 @@ static void *output_thread_fn(void *arg) {
                     if (web_enabled) {
                         web_map_add_ra(&decoded.ira, decoded.timestamp,
                                         decoded.frequency);
-                        if (decoded.ira.alt >= 0 && decoded.ira.alt < 100) {
-                            pthread_mutex_lock(&beam_cache_lock);
-                            beam_cache[beam_cache_head % BEAM_CACHE_SIZE] =
-                                (beam_cache_t){
-                                    .lat = decoded.ira.lat,
-                                    .lon = decoded.ira.lon,
-                                    .sat_id = decoded.ira.sat_id,
-                                    .beam_id = decoded.ira.beam_id,
-                                    .timestamp_ns = decoded.timestamp
-                                };
-                            beam_cache_head++;
-                            pthread_mutex_unlock(&beam_cache_lock);
-                        }
                     }
                     if (position_enabled)
                         doppler_pos_add_measurement(&decoded.ira,
@@ -1103,6 +1054,9 @@ static void *stats_thread_fn(void *arg) {
     unsigned q_max = 0;
     double quiet = 0;       /* seconds without a detected burst */
     unsigned long quiet_samples = 0;    /* samples that arrived meanwhile */
+    /* Counters at the last status line: a line covers its whole interval */
+    unsigned long pw_t = t0, pw_det = 0, pw_ok = 0, pw_sub = 0;
+    unsigned long pw_handled = 0, pw_samples = 0;
 
     while (running) {
         usleep(1000000);
@@ -1164,6 +1118,18 @@ static void *stats_thread_fn(void *arg) {
             }
         }
 
+        /* Status line due? Its rates cover everything since the last one */
+        int print_due = stats_interval > 0 &&
+                        (now - pw_t) / 1000.0 + 0.5 >= stats_interval;
+        if (print_due) {
+            dd    = det     - pw_det;
+            dk    = ok      - pw_ok;
+            ds    = sub     - pw_sub;
+            dh    = handled - pw_handled;
+            dsamp = samp    - pw_samples;
+            dt    = (now - pw_t) / 1000.0;
+        }
+
         /* Rates */
         double in_rate     = dd / dt;
         double in_rate_avg = det / elapsed;
@@ -1176,7 +1142,9 @@ static void *stats_thread_fn(void *arg) {
         double out_ok_pct = dd > 0  ? 100.0 * ds  / dd  : 0;
         double ok_avg_pct = det > 0 ? 100.0 * sub / det : 0;
 
-        if (diagnostic_mode) {
+        if (!print_due) {
+            /* nothing to print this second */
+        } else if (diagnostic_mode) {
             /* Diagnostic mode display */
             int runtime_sec = (int)elapsed;
             int hours = runtime_sec / 3600;
@@ -1260,23 +1228,31 @@ static void *stats_thread_fn(void *arg) {
         /* Suppress unused variable warning */
         (void)dsamp;
 
-        /* Doppler positioning: attempt solve every 10 seconds */
+        /* Doppler positioning: attempt solve every 10 seconds; say so
+         * every 10 s, or every stats interval if that is longer */
         if (position_enabled && (int)elapsed % 10 == 0 && elapsed > 5) {
+            int every = stats_interval > 10 ? stats_interval : 10;
+            int say = stats_interval > 0 && (int)elapsed % every < 10;
             doppler_solution_t sol;
             if (doppler_pos_solve(&sol)) {
-                fprintf(stderr, "POSITION: %.6f, %.6f (HDOP=%.1f, %d sats, %d meas)\n",
-                        sol.lat, sol.lon, sol.hdop, sol.n_satellites,
-                        sol.n_measurements);
+                if (say)
+                    fprintf(stderr, "POSITION: %.6f, %.6f (HDOP=%.1f, %d sats, %d meas)\n",
+                            sol.lat, sol.lon, sol.hdop, sol.n_satellites,
+                            sol.n_measurements);
                 if (web_enabled)
                     web_map_set_position(sol.lat, sol.lon, sol.hdop);
-            } else if ((int)elapsed % 60 == 0) {
+            } else if (say && (int)elapsed % (every > 60 ? every : 60) < 10) {
                 fprintf(stderr, "POSITION: waiting (%d sats, %d meas)\n",
                         sol.n_satellites, sol.n_measurements);
             }
         }
 
         /* Reset per-interval tracking */
-        q_max = 0;
+        if (print_due) {
+            q_max = 0;
+            pw_t = now; pw_det = det; pw_ok = ok; pw_sub = sub;
+            pw_handled = handled; pw_samples = samp;
+        }
         prev_det     = det;
         prev_ok      = ok;
         prev_sub     = sub;

@@ -102,6 +102,7 @@ extern int sdrplay_gain_val;
 extern int bias_tee;
 extern int use_gpu;
 extern int stall_exit_s;
+extern int stats_interval;
 extern int full_burst_window;
 extern int legacy_frontend;
 extern int no_block_thread;
@@ -147,7 +148,6 @@ extern char *zmq_sub_endpoint;
 extern int vita49_enabled;
 extern char *vita49_endpoint;
 extern int basestation_enabled;
-extern int basestation_beam;
 extern char *basestation_endpoint;
 extern int num_downmix_workers;
 extern char *aircraft_db_path;
@@ -218,6 +218,8 @@ static void usage(int exitcode) {
 "    --workers=N             downmix worker threads (1-32, default: auto from CPU cores)\n"
 "    --stall-exit=SECONDS    live radio silent this long: exit (code 3) so the\n"
 "                             service restarts it (default 300, 0 = never)\n"
+"    --stats-interval=SECONDS  print the status line this often (default 1,\n"
+"                             0 = never); 60 keeps a service's journal small\n"
 "    --chase[=N]             enable Chase soft-decision BCH decoder (experimental)\n"
 "                             N = flip-bits count, 0-7 (default 5 = 31 combos).\n"
 "                             0 or omitting --chase disables (default).\n"
@@ -299,8 +301,7 @@ static void usage(int exitcode) {
 "  BaseStation output:\n"
 "    --basestation[=PORT]     SBS server on PORT (default 30003, tools connect in)\n"
 "    --basestation=HOST:PORT  SBS push to remote host (auto-reconnect)\n"
-"    --basestation-beam       include beam-estimated positions in SBS feed\n"
-"                             (default: only GPS-quality positions are sent)\n"
+"                             (only positions the aircraft reported are sent)\n"
 "    --aircraft-db=PATH       aircraft database CSV (default: ~/.iridium-sniffer/aircraft.csv)\n"
 "    --update-db              download/update aircraft database and exit\n"
 "\n"
@@ -409,6 +410,7 @@ void parse_options(int argc, char **argv) {
         OPT_UPDATE_DB,
         OPT_WORKERS,
         OPT_STALL_EXIT,
+        OPT_STATS_INTERVAL,
     };
 
     static const struct option longopts[] = {
@@ -482,6 +484,7 @@ void parse_options(int argc, char **argv) {
         { "update-db",      no_argument,       NULL, OPT_UPDATE_DB },
         { "workers",        required_argument, NULL, OPT_WORKERS },
         { "stall-exit",     required_argument, NULL, OPT_STALL_EXIT },
+        { "stats-interval", required_argument, NULL, OPT_STATS_INTERVAL },
         { NULL,             0,                 NULL, 0 }
     };
 
@@ -910,7 +913,10 @@ void parse_options(int argc, char **argv) {
                 break;
 
             case OPT_BASESTATION_BEAM:
-                basestation_beam = 1;
+                /* Accepted so saved settings still start; beam positions
+                 * were 1,000-3,000 km out and are no longer made (#8). */
+                fprintf(stderr, "--basestation-beam: no longer has any effect; "
+                        "only positions the aircraft reported are sent\n");
                 break;
 
             case OPT_AIRCRAFT_DB:
@@ -926,6 +932,15 @@ void parse_options(int argc, char **argv) {
                 stall_exit_s = atoi(optarg);
                 if (stall_exit_s < 0 || stall_exit_s > 86400)
                     errx(1, "--stall-exit must be 0-86400 seconds (0 = never)");
+                break;
+
+            case OPT_STATS_INTERVAL: {
+                char *end;
+                long v = strtol(optarg, &end, 10);
+                if (end == optarg || *end || v < 0 || v > 86400)
+                    errx(1, "--stats-interval must be 0-86400 seconds (0 = no status lines)");
+                stats_interval = (int)v;
+            }
                 break;
 
             case OPT_WORKERS: {
