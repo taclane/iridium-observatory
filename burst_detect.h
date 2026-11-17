@@ -70,8 +70,8 @@ typedef struct {
                                0 = cut each burst to its frame (default) */
     int output_rate;        /* downmix rate for the overlap-save front end;
                                0 = hand on full-rate samples (legacy) */
-    int block_thread;       /* 1 = the front end's block FFTs on a thread of
-                               their own (when there are 2+ CPUs) */
+    int block_thread;       /* the front end's block FFTs on a thread of their
+                               own: 1 on, 0 off, -1 auto (on on a Raspberry Pi) */
 } burst_config_t;
 
 /* Create a burst detector with the given configuration.

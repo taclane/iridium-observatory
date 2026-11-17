@@ -72,7 +72,16 @@ CMake output shows what was detected:
 
 ### Low-Power Hardware (N100, Pi 5, ARM)
 
-**Raspberry Pi 4: works on a 64-bit OS, with less headroom.** v1.2 on a Pi 4 (4 GB, Cortex-A72 at 1.8 GHz, 64-bit Debian trixie, NEON kernels) with a HackRF One at 10 MS/s kept up live with no dropped samples. The burst detector, the one thread that can't be spread over cores, ran at about 78% of a core. A 60-second Airspy R2 recording replayed at real speed decoded every frame the recording holds, with the sample queue peaking at 216 of 512. A Pi 5 or an N100 has much more margin. Three things decide whether a Pi 4 works:
+**Raspberry Pi 4: works on a 64-bit OS.** The limit on a Pi is the burst detector, the one thread that can't be spread over cores: it runs the detection FFTs and, since v1.2, the overlap-save front end's block FFTs too. On a Raspberry Pi the receiver moves the block FFTs to a thread of their own (`blockfft`) on another core; elsewhere `--low-power` does the same. It costs CPU in all, because the thread transforms every block, a third more than bursts need, so on a fast machine it is left off.
+
+On a Pi 4 (4 GB, Cortex-A72 at 1.8 GHz, 64-bit Debian trixie, NEON kernels) with a HackRF One at 10 MS/s, live:
+
+| | detector thread | blockfft thread | sample queue peak |
+|---|---|---|---|
+| block FFTs on the detector thread (`--no-block-thread`) | 78% of a core | — | 1 of 512 |
+| on their own thread (the default on a Pi) | **45%** | 54% | 0 |
+
+A 60-second Airspy R2 recording replayed at real speed decoded every frame either way, with the queue peaking at 79 of 512 with the block thread and 216 without. A Pi 5 or an N100 has more margin. Three things decide whether a Pi 4 works:
 
 - **A 64-bit OS.** The NEON kernels are AArch64 code. On a 32-bit OS, even on a 64-bit kernel, the receiver builds without them and runs plain C. Check with `getconf LONG_BIT`, which should say 64.
 - **Power.** A supply that sags throttles the CPU (to 600 MHz) and starves the SDR and its bias-tee LNA. On the test Pi, the official touchscreen's backlight was enough to do that: 10 under-voltage events in 3 minutes and a fifth of the decoded frames, until the backlight was turned off (`echo 1 | sudo tee /sys/class/backlight/*/bl_power`). Use a 3 A supply, power the SDR from a powered USB hub if you can, and check `vcgencmd get_throttled`: anything but `0x0` means it has run short since boot.
@@ -914,8 +923,11 @@ Detection options:
                              as gr-iridium does (default: cut it to the frame)
     --legacy-frontend       shift and decimate each burst on its own in the
                              downmix (default: one shared overlap-save FFT)
-    --no-block-thread       run the overlap-save block FFTs on the detector's
-                             thread (default: their own, with 2+ CPUs)
+    --low-power             for a slow CPU: the overlap-save block FFTs on a thread
+                             of their own, off the detector thread (always on on
+                             a Raspberry Pi; costs CPU in all on a fast machine)
+    --no-block-thread       keep the block FFTs on the detector thread, even on
+                             a Raspberry Pi or with --low-power
     --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar
     --no-simd               alias for --simd=scalar
     --workers=N             downmix worker threads (1-32, default: auto from CPU cores)

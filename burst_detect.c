@@ -494,8 +494,27 @@ burst_detector_t *burst_detector_create(burst_config_t *config) {
          * leaves it detection, which can't be split. Not with an FFT plugin:
          * its state machine runs a whole batch (~110 blocks) behind the
          * newest input, further than the block cache reaches, and the
-         * plugin has taken this thread's own FFTs already. */
-        if (d->osc && !d->gpu && config->block_thread && sysconf(_SC_NPROCESSORS_ONLN) >= 2 &&
+         * plugin has taken this thread's own FFTs already.
+         *
+         * By default only on a Raspberry Pi (else --low-power). The thread
+         * transforms every block, a third more than bursts need, and each
+         * costs more on another core. On a Pi 4 (four cores, no SMT) that
+         * is cheap for what it frees: the detector thread went from 78% to
+         * 45% of a core. On x86 the detector gained 7 points for 16
+         * (i5-8500T) to 37 (2-core/4-thread i5 at 800 MHz) points more in
+         * all, and a fast ARM desktop has no use for it either. */
+        int bt = config->block_thread;
+        if (bt < 0) {
+            char model[64] = "";
+            FILE *f = fopen("/proc/device-tree/model", "r");
+            if (f) {
+                if (!fgets(model, sizeof(model), f))
+                    model[0] = '\0';
+                fclose(f);
+            }
+            bt = strncmp(model, "Raspberry Pi", 12) == 0;
+        }
+        if (d->osc && !d->gpu && bt && sysconf(_SC_NPROCESSORS_ONLN) >= 2 &&
             os_chan_start_thread(d->osc) == 0)
             fprintf(stderr, "burst_detect: overlap-save block FFTs on their own thread\n");
         if (d->osc && d->osc_bins_per == 0) {
