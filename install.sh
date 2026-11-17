@@ -443,7 +443,6 @@ mkdir -p "$STAGE/bin" "$STAGE/data" "$STAGE/observatory"
 cp "$BIN" "$STAGE/bin/"
 for p in "$BUILD_DIR"/libiridium-sniffer-gpu.*; do [ -e "$p" ] && cp "$p" "$STAGE/bin/"; done
 cp "$REPO_ROOT/data/waypoints.csv" "$STAGE/data/"
-for f in "$REPO_ROOT"/data/fftw-wisdom-*; do [ -e "$f" ] && cp "$f" "$STAGE/data/"; done
 cp "$REPO_ROOT"/observatory/*.py "$REPO_ROOT/observatory/install_observatory.sh" "$STAGE/observatory/"
 cp -r "$REPO_ROOT/observatory/sgp4" "$STAGE/observatory/"   # vendored, pure Python
 rm -rf "$STAGE/observatory/sgp4/__pycache__"
