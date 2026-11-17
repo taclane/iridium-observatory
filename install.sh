@@ -494,6 +494,38 @@ if grep -qE '(^| )--basestation([ =]|$)' <<<" $SNIFFER_ARGS"; then
   fi
 fi
 
+# ---- FFT planning -----------------------------------------------------------
+# FFTW times its candidate algorithms for each FFT size the first time it meets
+# them: well under a second on most PCs, about 2 minutes on a Raspberry Pi 4.
+# Do it here, once, for this station's sample rate, so the receiver starts
+# listening straight away. The receiver keeps the result in
+# ~/.iridium-sniffer-fftw-wisdom (this user's, the service runs as it too);
+# when that already covers the rate, this takes a few seconds.
+RATE=10000000; PLAN_FLAGS=""; prev=""
+for a in $SNIFFER_ARGS; do
+  case "$prev" in -r|--sample-rate) RATE="$a";; esac
+  case "$a" in
+    --sample-rate=*) RATE="${a#*=}";;
+    --no-gpu|--legacy-frontend) PLAN_FLAGS+=" $a";;   # these change which FFTs exist
+  esac
+  prev="$a"
+done
+if [ "$DRY_RUN" -eq 1 ]; then
+  printf '  %s[dry-run]%s %s\n' "$Y" "$Z" "$PREFIX/bin/iridium-sniffer -f <0.02 s of silence> -r $RATE$PLAN_FLAGS"
+else
+  info "Planning FFTs for $RATE S/s (about 2 minutes on a Raspberry Pi 4, once)"
+  PLAN_IN="$(mktemp)"
+  head -c 400000 /dev/zero > "$PLAN_IN"     # the input doesn't matter, the plans do
+  # shellcheck disable=SC2086
+  if "$PREFIX/bin/iridium-sniffer" -f "$PLAN_IN" --format=ci8 -r "$RATE" -c 1622000000 \
+       $PLAN_FLAGS > /dev/null 2> "$PLAN_IN.log"; then
+    ok "FFTs planned ($HOME/.iridium-sniffer-fftw-wisdom)"
+  else
+    warn "FFT planning failed — the receiver will plan at its first start instead"
+  fi
+  rm -f "$PLAN_IN" "$PLAN_IN.log"
+fi
+
 # ---- sniffer service --------------------------------------------------------
 info "Sniffer service"
 if [ -f "$UNIT" ] && ! head -1 "$UNIT" | grep -qF "$MARKER"; then
