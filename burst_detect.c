@@ -136,7 +136,8 @@ struct _burst_detector {
     float *magnitude_shifted;   /* [fft_size] DC-shifted mag^2 */
     float *relative_magnitude;  /* [fft_size] current / baseline */
     float *burst_mask;          /* [fft_size] 0 where burst active, 1 elsewhere */
-    float *ones;                /* [fft_size] all 1.0 */
+    int *masked;                /* bin ranges zeroed in it now: lo, hi pairs */
+    int num_masked, masked_cap; /* (pairs) */
 
     /* Burst tracking */
     active_burst_t *bursts;
@@ -174,9 +175,6 @@ struct _burst_detector {
     int osc_bins_per;           /* block FFT bins per detector bin */
     int osc_rate;
 
-    /* int8 -> float complex conversion buffer */
-    float complex *convert_buf;
-    size_t convert_buf_size;
 
     /* Timestamp */
     uint64_t start_time_ns;     /* nanosecond timestamp at sample 0 */
@@ -413,11 +411,9 @@ burst_detector_t *burst_detector_create(burst_config_t *config) {
     d->magnitude_shifted = aligned_calloc_32(d->fft_size, sizeof(float));
     d->relative_magnitude = aligned_calloc_32(d->fft_size, sizeof(float));
     d->burst_mask = aligned_alloc_32(sizeof(float) * d->fft_size);
-    d->ones = aligned_alloc_32(sizeof(float) * d->fft_size);
 
     for (int i = 0; i < d->fft_size; i++) {
         d->burst_mask[i] = 1.0f;
-        d->ones[i] = 1.0f;
     }
 
     d->history_index = 0;
@@ -494,6 +490,33 @@ burst_detector_t *burst_detector_create(burst_config_t *config) {
         d->osc = os_chan_create(d->sample_rate, config->output_rate,
                                 ringbuf_read_cb, d);
         d->osc_bins_per = d->osc ? os_chan_bins_per(d->osc, d->fft_size) : 0;
+        /* Block FFTs were most of this thread's work; a thread of their own
+         * leaves it detection, which can't be split. Not with an FFT plugin:
+         * its state machine runs a whole batch (~110 blocks) behind the
+         * newest input, further than the block cache reaches, and the
+         * plugin has taken this thread's own FFTs already.
+         *
+         * By default only on a Raspberry Pi (else --low-power). The thread
+         * transforms every block, a third more than bursts need, and each
+         * costs more on another core. On a Pi 4 (four cores, no SMT) that
+         * is cheap for what it frees: the detector thread went from 78% to
+         * 45% of a core. On x86 the detector gained 7 points for 16
+         * (i5-8500T) to 37 (2-core/4-thread i5 at 800 MHz) points more in
+         * all, and a fast ARM desktop has no use for it either. */
+        int bt = config->block_thread;
+        if (bt < 0) {
+            char model[64] = "";
+            FILE *f = fopen("/proc/device-tree/model", "r");
+            if (f) {
+                if (!fgets(model, sizeof(model), f))
+                    model[0] = '\0';
+                fclose(f);
+            }
+            bt = strncmp(model, "Raspberry Pi", 12) == 0;
+        }
+        if (d->osc && !d->gpu && bt && sysconf(_SC_NPROCESSORS_ONLN) >= 2 &&
+            os_chan_start_thread(d->osc) == 0)
+            fprintf(stderr, "burst_detect: overlap-save block FFTs on their own thread\n");
         if (d->osc && d->osc_bins_per == 0) {
             os_chan_destroy(d->osc);
             d->osc = NULL;
@@ -532,7 +555,7 @@ void burst_detector_destroy(burst_detector_t *d) {
     free(d->magnitude_shifted);
     free(d->relative_magnitude);
     free(d->burst_mask);
-    free(d->ones);
+    free(d->masked);
     free(d->peaks);
     free(d->bursts);
     free(d->new_bursts);
@@ -546,7 +569,6 @@ void burst_detector_destroy(burst_detector_t *d) {
         os_chan_destroy(d->osc);
     }
     free(d->ringbuf);
-    free(d->convert_buf);
     fprintf(stderr, "burst_detect: tagged %lu bursts total\n",
             (unsigned long)d->n_tagged_bursts);
     free(d);
@@ -587,18 +609,15 @@ float burst_detector_peak_signal(burst_detector_t *d) {
 
 /* ---- Internal: ringbuffer operations ---- */
 
-static void ringbuf_write(burst_detector_t *d, const float complex *samples, size_t n) {
+/* n samples have been written at ringbuf_write (wrapping): move it on. */
+static void ringbuf_advance(burst_detector_t *d, size_t n) {
     size_t pos = d->ringbuf_write;
     if (pos + n <= d->ringbuf_size) {
-        memcpy(&d->ringbuf[pos], samples, n * sizeof(float complex));
         d->ringbuf_write = pos + n;
         if (d->ringbuf_write == d->ringbuf_size)
             d->ringbuf_write = 0;
     } else {
-        size_t first = d->ringbuf_size - pos;
-        memcpy(&d->ringbuf[pos], samples, first * sizeof(float complex));
-        memcpy(d->ringbuf, samples + first, (n - first) * sizeof(float complex));
-        d->ringbuf_write = n - first;
+        d->ringbuf_write = n - (d->ringbuf_size - pos);
     }
     /* Update the oldest available sample index */
     uint64_t total_written = d->sample_count;
@@ -632,6 +651,51 @@ static float complex *ringbuf_extract(burst_detector_t *d, uint64_t start,
     return buf;
 }
 
+/* Writing n samples to the ring: ring_begin, then the samples at
+ * ringbuf_write (wrapping at ringbuf_size), then ring_commit. The block
+ * thread reads the ring too: os_chan_overwrite first waits until it isn't
+ * reading anything about to be overwritten. */
+static void ring_begin(burst_detector_t *d, size_t n) {
+    if (d->osc)
+        os_chan_overwrite(d->osc, d->sample_count + n > d->ringbuf_size
+                                  ? d->sample_count + n - d->ringbuf_size : 0);
+}
+
+static void ring_commit(burst_detector_t *d, size_t n) {
+    ringbuf_advance(d, n);
+    __atomic_store_n(&d->sample_count, d->sample_count + n, __ATOMIC_RELEASE);
+    /* Straight away, so the thread transforms the blocks these samples
+     * complete while this thread runs detection over them: the last block
+     * of each burst to be emitted is one of them. */
+    if (d->osc)
+        os_chan_advance(d->osc, d->index, d->sample_count);
+}
+
+/* Interleaved float I/Q is float complex already: copy it straight in. */
+static void ring_append_cf(burst_detector_t *d, const float complex *samples, size_t n) {
+    ring_begin(d, n);
+    size_t pos = d->ringbuf_write, first = d->ringbuf_size - pos;
+    if (first > n)
+        first = n;
+    memcpy(&d->ringbuf[pos], samples, first * sizeof(float complex));
+    memcpy(d->ringbuf, samples + first, (n - first) * sizeof(float complex));
+    ring_commit(d, n);
+}
+
+/* int8 I/Q converted straight into the ring, not through a buffer and a
+ * copy (that copy was 6% of this thread on a Pi 4 with a HackRF). The
+ * converters store unaligned, so any ring position will do. */
+static void ring_append_i8(burst_detector_t *d, const int8_t *iq, size_t n) {
+    ring_begin(d, n);
+    size_t pos = d->ringbuf_write, first = d->ringbuf_size - pos;
+    if (first > n)
+        first = n;
+    simd_convert_i8_cf(iq, &d->ringbuf[pos], first);
+    if (n > first)
+        simd_convert_i8_cf(iq + 2 * first, d->ringbuf, n - first);
+    ring_commit(d, n);
+}
+
 /* os_chan's read callback: copy [start, start + n), zero-filling what the
  * ring doesn't hold (aged out, or not received yet). The oldest sample held
  * is worked out from sample_count here rather than taken from ringbuf_start,
@@ -639,9 +703,12 @@ static float complex *ringbuf_extract(burst_detector_t *d, uint64_t start,
 static int ringbuf_read_cb(void *ctx, uint64_t start, size_t n,
                            float complex *dst) {
     burst_detector_t *d = ctx;
-    uint64_t have_lo = d->sample_count > d->ringbuf_size
-                       ? d->sample_count - d->ringbuf_size : 0;
-    uint64_t have_hi = d->sample_count;
+    /* Called from the block thread too: sample_count is published with
+     * release (ring_append), and os_chan keeps the thread off any part of
+     * the ring being written. */
+    uint64_t count = __atomic_load_n(&d->sample_count, __ATOMIC_ACQUIRE);
+    uint64_t have_lo = count > d->ringbuf_size ? count - d->ringbuf_size : 0;
+    uint64_t have_hi = count;
     uint64_t lo = start > have_lo ? start : have_lo;
     uint64_t hi = start + n < have_hi ? start + n : have_hi;
     int complete = lo == start && hi == start + n;
@@ -717,10 +784,23 @@ static void mask_burst(burst_detector_t *d, active_burst_t *b) {
     if (clear_stop >= d->fft_size) clear_stop = d->fft_size - 1;
     memset(d->burst_mask + clear_start, 0,
            (clear_stop - clear_start + 1) * sizeof(float));
+    if (d->num_masked == d->masked_cap) {
+        d->masked_cap = d->masked_cap ? d->masked_cap * 2 : 64;
+        d->masked = realloc(d->masked, sizeof(int) * 2 * d->masked_cap);
+    }
+    d->masked[2 * d->num_masked] = clear_start;
+    d->masked[2 * d->num_masked + 1] = clear_stop;
+    d->num_masked++;
 }
 
+/* Once per FFT frame. Only the ranges zeroed last frame go back to 1, not
+ * the whole mask: a few hundred bins against fft_size (8192 at 10 MS/s),
+ * and the same mask. */
 static void update_burst_mask(burst_detector_t *d) {
-    memcpy(d->burst_mask, d->ones, sizeof(float) * d->fft_size);
+    for (int i = 0; i < d->num_masked; i++)
+        for (int k = d->masked[2 * i]; k <= d->masked[2 * i + 1]; k++)
+            d->burst_mask[k] = 1.0f;
+    d->num_masked = 0;
     for (int i = 0; i < d->num_bursts; i++)
         mask_burst(d, &d->bursts[i]);
 }
@@ -1110,20 +1190,8 @@ void burst_detector_feed(burst_detector_t *d, const int8_t *iq,
     }
     d->pending_hw_ts = 0;
 
-    /* Convert int8 to float complex and write to ringbuffer */
-
-    if (num_samples > d->convert_buf_size) {
-        free(d->convert_buf);
-        d->convert_buf_size = num_samples;
-        d->convert_buf = aligned_alloc_32(sizeof(float complex) * d->convert_buf_size);
-    }
-
-    /* int8 IQ -> float complex (SIMD-accelerated) */
-    simd_convert_i8_cf(iq, d->convert_buf, num_samples);
-
-    /* Write to ringbuffer */
-    ringbuf_write(d, d->convert_buf, num_samples);
-    d->sample_count += num_samples;
+    /* int8 IQ -> float complex (SIMD-accelerated), into the ringbuffer */
+    ring_append_i8(d, iq, num_samples);
 
     /* Process complete FFT frames */
     if (d->gpu) {
@@ -1208,19 +1276,8 @@ void burst_detector_feed_cf32(burst_detector_t *d, const float *iq,
     }
     d->pending_hw_ts = 0;
 
-    /* Convert interleaved float pairs to float complex and write to ringbuffer */
-    if (num_samples > d->convert_buf_size) {
-        free(d->convert_buf);
-        d->convert_buf_size = num_samples;
-        d->convert_buf = malloc(sizeof(float complex) * d->convert_buf_size);
-    }
-
-    for (size_t i = 0; i < num_samples; i++)
-        d->convert_buf[i] = iq[2 * i] + iq[2 * i + 1] * I;
-
-    /* Write to ringbuffer */
-    ringbuf_write(d, d->convert_buf, num_samples);
-    d->sample_count += num_samples;
+    /* Interleaved float pairs are float complex: into the ringbuffer */
+    ring_append_cf(d, (const float complex *)iq, num_samples);
 
     /* Process complete FFT frames (identical to int8 path) */
     if (d->gpu) {

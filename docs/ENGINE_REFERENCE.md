@@ -72,7 +72,24 @@ CMake output shows what was detected:
 
 ### Low-Power Hardware (N100, Pi 5, ARM)
 
-**A Raspberry Pi 4 is not supported.** On a Pi 4 (4 GB) with an Airspy R2 at 10 MS/s the receiver used all four cores, its frame clock fell almost four hours behind real time, memory grew to 3 GB plus swap, and few bursts decoded into messages. Burst detection and downmixing over the full band are the cost; the Pi 5 is the smallest ARM board that keeps up. The installer warns and asks before continuing on a Pi 4 or older.
+**Raspberry Pi 4: works on a 64-bit OS.** The limit on a Pi is the burst detector, the one thread that can't be spread over cores: it runs the detection FFTs and, since v1.2, the overlap-save front end's block FFTs too. On a Raspberry Pi the receiver moves the block FFTs to a thread of their own (`blockfft`) on another core; elsewhere `--low-power` does the same. It costs CPU in all, because the thread transforms every block, a third more than bursts need, so on a fast machine it is left off.
+
+On a Pi 4 (4 GB, Cortex-A72 at 1.8 GHz, 64-bit Debian trixie, NEON kernels) with a HackRF One at 10 MS/s, live:
+
+| | detector thread | blockfft thread | sample queue peak |
+|---|---|---|---|
+| block FFTs on the detector thread (`--no-block-thread`) | 78% of a core | — | 1 of 512 |
+| on their own thread (the default on a Pi) | **45%** | 54% | 0 |
+
+A 60-second Airspy R2 recording replayed at real speed decoded every frame either way, with the queue peaking at 79 of 512 with the block thread and 216 without. A Pi 5 or an N100 has more margin. Three things decide whether a Pi 4 works:
+
+- **A 64-bit OS.** The NEON kernels are AArch64 code. On a 32-bit OS, even on a 64-bit kernel, the receiver builds without them and runs plain C. Check with `getconf LONG_BIT`, which should say 64.
+- **Power.** A supply that sags throttles the CPU (to 600 MHz) and starves the SDR and its bias-tee LNA. On the test Pi, the official touchscreen's backlight was enough to do that: 10 under-voltage events in 3 minutes and a fifth of the decoded frames, until the backlight was turned off (`echo 1 | sudo tee /sys/class/backlight/*/bl_power`). Use a 3 A supply, power the SDR from a powered USB hub if you can, and check `vcgencmd get_throttled`: anything but `0x0` means it has run short since boot.
+- **FFT planning takes about 2¼ minutes, once,** before the radio first starts (see the FFTW wisdom note below). After that, starts take seconds.
+
+To try a machine before it goes live, replay a recording at real speed with `--file-realtime` and watch the status line: any `sdrop:` means it would lose signal with that radio.
+
+An earlier test on a Pi 4 with an Airspy R2 fell almost four hours behind real time and grew to 3 GB plus swap. A frame clock hours behind is what dropped samples did before v1.2.1, when they were neither counted nor accounted for in frame times: every dropped sample stamped every later frame early. That points to a machine short of CPU for that setup, not to a backlog. A Pi 3, Zero or older is too slow; the installer warns and asks before continuing on one, and on any 32-bit ARM OS.
 
 `--sync-gate=0.2` saves CPU on boxes that are short of it. Most burst detections are false positives that the demodulator rejects after doing all its work; the gate stops downlink bursts with no unique word in their sync correlation before the demodulator runs. On a 30-minute recording with an Airspy R2 at 10 MS/s it gated 43% of detections and cut total CPU by 4.3%, for 0.01-0.02% of decodable frames (marginal ones, around 50% confidence) and no lost ACARS or pager messages. Higher thresholds save little more (the saving levels off near 7%) and cost real frames at a fast-rising rate; stay at or below 0.25. Uplink bursts are never gated. Off by default so that decoding matches upstream.
 
@@ -908,6 +925,11 @@ Detection options:
                              as gr-iridium does (default: cut it to the frame)
     --legacy-frontend       shift and decimate each burst on its own in the
                              downmix (default: one shared overlap-save FFT)
+    --low-power             for a slow CPU: the overlap-save block FFTs on a thread
+                             of their own, off the detector thread (always on on
+                             a Raspberry Pi; costs CPU in all on a fast machine)
+    --no-block-thread       keep the block FFTs on the detector thread, even on
+                             a Raspberry Pi or with --low-power
     --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar
     --no-simd               alias for --simd=scalar
     --workers=N             downmix worker threads (1-32, default: auto from CPU cores)
